@@ -53,27 +53,6 @@ options(future.globals.maxSize = 2 * 1024^3)  # 2 GB
 plan(multisession, workers = 4)  # Usa varios núcleos
 ```
 
-
-## Kaggle
-
-```{r}
-comp_id <- "store-sales-time-series-forecasting"
-```
-
-## Data download
-
-::: {.callout-tip}
-
-Only needs to be run once.
-
-```{r}
-#| eval: false
-
-kgl_competitions_data_download_all(id = comp_id)
-```
-
-:::
-
 # Data import
 
 ## `train.csv`
@@ -205,13 +184,114 @@ series_ceros_fcst <- series_ceros_fit |>
 series_ceros_fcst
 ```
 
+First, several questions arise about our data, two in particular:
+1. Will there be time series with many zeros at the beginning?
+2. Will there be time series with only zeros at the end?
+
+## We filter out the zeros
+
+### First question:
+
+```{r}
+# We look for the first non-null value in each series:
+primer_valor_no_cero <- series_tsbl |> 
+  group_by(store_nbr, family) |>  
+  filter(sales != 0) |>  
+  slice_min(date) |>  # We choose the first row (the first non-zero value)
+  select(store_nbr, family, date) |> 
+  arrange(desc(date)) |> 
+  rename(fecha_inicio = date)
+primer_valor_no_cero
+```
+
+```{r}
+# Filter the series by removing data prior to the first non-zero value
+ceros_series_filtradas <- series_tsbl |> 
+  left_join(primer_valor_no_cero, by = c("store_nbr", "family")) |>  
+  filter(date < fecha_inicio) |>  # We perform the join only when the date is less than 'fecha_inicio'
+  select(-fecha_inicio)  # We remove the 'fecha_inicio' column from the resulting table
+
+# Filtramos y guardamos las series importantes
+series_tsbl_filtered <- series_tsbl |> 
+  anti_join(ceros_series_filtradas, by = c("date", "store_nbr", "family"))
+
+series_tsbl_filtered
+```
+
+Now for the second question, simply filter out those time series where the last 30 days had sales = 0.
+This makes your Forecast equal to 0.
+
+### Second question:
+```{r}
+# Last month:
+series_tsbl_ultimo_mes <- series_tsbl_filtered |>
+  filter(date >= as.Date("2017-07-15"), date <= as.Date("2017-08-15"))
+
+# Let's see which ones are all zero. 
+# I'll also take this opportunity to exclude from my forecasts those that had very few sales.
+series_pocas_ventas_ultimo_mes <- series_tsbl_ultimo_mes |>
+  as_tibble() |> 
+  group_by(store_nbr, family) |> 
+  summarise(sales = sum(sales), .groups = "drop") |> 
+  filter(sales < 4) |> 
+  select(-sales)
+series_pocas_ventas_ultimo_mes
+```
+
+So let's make their forecast:
+```{r}
+# First we will remove the data from these 82 time series from the important tsibble:
+series_tsbl_importantes <- series_tsbl_filtered |> 
+  anti_join(series_pocas_ventas_ultimo_mes, by = c("store_nbr", "family"))
+
+# Now we work with 'series_pocas_ventas_ultimo_mes'
+series_pobres_ultimo_mes <- series_pocas_ventas_ultimo_mes |>
+  left_join(series_tsbl_ultimo_mes, by = c("store_nbr", "family")) |>
+  as_tsibble(index = date, key = c(store_nbr, family))
+
+# Now the forecast:
+series_pobres_ultimo_mes_fit <- series_pobres_ultimo_mes |> 
+  model(naive = NAIVE(sales))
+
+series_pobres_ultimo_mes_fcst <- series_pobres_ultimo_mes_fit |> 
+  forecast(h = 16)
+
+series_pobres_ultimo_mes_fcst
+```
+
+## Simple models
+Now that I've filtered some time series based on some conditions related to business rules.
+I can filter out those time series that predict well using a simple model.
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Benchmark model
 
 ## Fit
 
 ```{r}
 tictoc::tic()
-series_tsbl_fit <- series_tsbl |> 
+series_tsbl_fit <- series_tsbl_importantes |> 
   model(
     ets = ETS(sales)
   )
@@ -242,7 +322,8 @@ Joining forecasts
 
 ```{r}
 full_fcst <- series_tsbl_fcst |> 
-  bind_rows(series_ceros_fcst)
+  bind_rows(series_ceros_fcst) |>
+  bind_rows(series_pobres_ultimo_mes_fcst)
 
 full_fcst
 ```
@@ -263,7 +344,7 @@ submission
 
 ```{r}
 submission |> 
-  write_csv("VersionesPrueba/submission_M1.csv")
+  write_csv("VersionesPrueba/submission_M3.csv")
 ```
 
 ## we finished using parallelism
