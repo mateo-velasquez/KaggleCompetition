@@ -1,6 +1,7 @@
 ---
 title: "Store Sales Forecasting"
 subtitle: "Kaggle Competition"
+author: "Mateo"
 format: 
   html:
     toc: true
@@ -11,7 +12,15 @@ format:
 # Initial setup
 
 ## Packages
+```{r}
+#install.packages("devtools")
+#install.packages("tictoc")
+#install.packages("future")
+#install.packages("parallelly")
 
+```
+
+## Libraries
 ```{r}
 #| label: pkgs
 #| message: false
@@ -20,17 +29,31 @@ format:
 library(conflicted)
 ## install kaggler package from github
 # pak::pak("mkearney/kaggler")
+library(future)
+library(furrr)
 library(kaggler)
+library(tidymodels)
 library(tidyverse)
 library(tsibble)
 library(feasts)
 library(fable)
+library(fabletools)
+library(purrr)
+library(dplyr)
 
 conflicts_prefer(
   lubridate::date(),
   dplyr::filter()
 )
 ```
+
+### Usamos multisession:
+```{r}
+options(future.globals.maxSize = 2 * 1024^3)  # 2 GB
+plan(multisession, workers = 4)  # Usa varios núcleos
+```
+
+
 ## Kaggle
 
 ```{r}
@@ -59,7 +82,7 @@ kgl_competitions_data_download_all(id = comp_id)
 
 ```{r}
 #| label: train
-train_tsbl <- read_csv("train.csv", 
+train_tsbl <- read_csv("data/train.csv", 
                        show_col_types = FALSE) |> 
   as_tsibble(index = date, key = c(store_nbr, family)) |> 
   select(-onpromotion)
@@ -98,21 +121,21 @@ train_tsbl
 ### `holidays_events.csv`
 
 ```{r}
-holidays <- read_csv("holidays_events.csv", show_col_types = FALSE)
+holidays <- read_csv("data/holidays_events.csv", show_col_types = FALSE)
 holidays
 ```
 
 ### `stores.csv`
 
 ```{r}
-stores <- read_csv("stores.csv", show_col_types = FALSE)
+stores <- read_csv("data/stores.csv", show_col_types = FALSE)
 stores
 ```
 
 ### `oil.csv`
 
 ```{r}
-oil <- read_csv("oil.csv", show_col_types = FALSE) |> 
+oil <- read_csv("data/oil.csv", show_col_types = FALSE) |> 
   as_tsibble(index = date) |> 
   fill_gaps(.full = TRUE) |> 
   fill(dcoilwtico, .direction = "downup")
@@ -130,7 +153,7 @@ train_tsbl
 ### `test.csv`
 
 ```{r}
-test <- read_csv("test.csv", show_col_types = FALSE) |> 
+test <- read_csv("data/test.csv", show_col_types = FALSE) |> 
   select(-onpromotion)
 test
 ```
@@ -190,7 +213,7 @@ series_ceros_fcst
 tictoc::tic()
 series_tsbl_fit <- series_tsbl |> 
   model(
-    snaive = ETS(sales)
+    ets = ETS(sales)
   )
 tictoc::toc()
 
@@ -240,5 +263,11 @@ submission
 
 ```{r}
 submission |> 
-  write_csv("submission1_p25.csv")
+  write_csv("VersionesPrueba/submission_M1.csv")
+```
+
+## we finished using parallelism
+
+```{r}
+plan(sequential)
 ```
