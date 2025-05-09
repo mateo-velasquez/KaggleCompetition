@@ -1,0 +1,59 @@
+---
+title: "help"
+format: html
+---
+
+```{r}
+mejores_modelos_basicos <- rmsle_por_serie_modelos_basicos |>
+  group_by(store_nbr, family) |> 
+  slice_min(rmsle, n = 1) |>
+  ungroup() |> 
+  arrange(rmsle)
+
+# Now I filter:
+mejores_modelos_basicos_filtered <- mejores_modelos_basicos #|>
+#  filter(rmsle < 0.25)
+#mejores_modelos_basicos_filtered
+
+# Creo la tsibble de estas 814 series:
+series_tsbl_basicos <- series_tsbl_importantes |>
+  inner_join(mejores_modelos_basicos_filtered, by = c("store_nbr", "family")) |>
+  select(-rmsle) |>
+  as_tsibble(index = date, key = c(store_nbr, family))
+series_tsbl_basicos
+
+# Creo la tsible del resto:
+series_tsbl_importantes2 <- series_tsbl_importantes |>
+  anti_join(series_tsbl_basicos, by = c("store_nbr", "family")) |>
+  as_tsibble(index = date, key = c(store_nbr, family))
+series_tsbl_importantes2
+```
+
+### Now the forecast:
+```{r}
+# Ahora que identificamos los modelos importantes, procederemos a usarlos en la serie original:
+tictoc::tic()
+series_tsbl_basicos_fit <- series_tsbl_basicos |> 
+  model(
+    ets = ETS(sales),
+    naive = NAIVE(sales),
+    snaive = SNAIVE(sales),
+  )
+tictoc::toc()
+
+# luego los forecast:
+
+tictoc::tic()
+series_tsbl_basicos_fcst_varios <- series_tsbl_basicos_fit |> 
+  forecast(h = 16)
+tictoc::toc()
+series_tsbl_basicos_fcst_varios
+
+# Selecciono los mejores:
+series_tsbl_basicos_fcst <- series_tsbl_basicos_fcst_varios |> 
+  left_join(mejores_modelos_basicos_filtered, by = c("store_nbr", "family")) |>
+  filter(.model == modelo) |>
+  select(store_nbr, family, date, sales, .mean, rmsle, modelo)
+series_tsbl_basicos_fcst
+```
+

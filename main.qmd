@@ -17,6 +17,7 @@ format:
 #install.packages("tictoc")
 #install.packages("future")
 #install.packages("parallelly")
+#install.packages("anomalize")
 
 ```
 
@@ -31,11 +32,11 @@ library(conflicted)
 # pak::pak("mkearney/kaggler")
 library(future)
 library(furrr)
-library(kaggler)
 library(tidymodels)
 library(tidyverse)
 library(tsibble)
 library(feasts)
+library(anomalize)
 library(fable)
 library(fabletools)
 library(purrr)
@@ -47,10 +48,10 @@ conflicts_prefer(
 )
 ```
 
-### Usamos multisession:
+### I use multisession:
 ```{r}
 options(future.globals.maxSize = 2 * 1024^3)  # 2 GB
-plan(multisession, workers = 4)  # Usa varios núcleos
+plan(multisession, workers = 8) # Usa varios núcleos
 ```
 
 # Data import
@@ -259,16 +260,253 @@ series_pobres_ultimo_mes_fcst <- series_pobres_ultimo_mes_fit |>
 series_pobres_ultimo_mes_fcst
 ```
 
-## Simple models
+## Simple models (Poor series)
+Now we have the condition that to use certain models we need at least 2 complete cycles to get a good grip on seasonality, so we will filter out those series that do not have it and use simple models to forecast them
+
+```{r}
+casos_no_bianuales <- primer_valor_no_cero |>
+  filter(fecha_inicio > as.Date("2015-07-11")) |>
+  arrange(desc(fecha_inicio))
+
+series_no_bianuales_tslb <- series_tsbl_importantes |>
+  inner_join(casos_no_bianuales, by = c("store_nbr","family")) |>
+  as_tsibble(index = date, key = c(store_nbr, family))
+series_no_bianuales_tslb
+
+series_tsbl_importantes2 <- series_tsbl_importantes |>
+  anti_join(series_no_bianuales_tslb,by = c("store_nbr","family"))
+series_tsbl_importantes2
+```
+
 Now that I've filtered some time series based on some conditions related to business rules.
 I can filter out those time series that predict well using a simple model.
 ```{r}
+# First I do the Train series
+series_no_bianuales_tslb_train <- series_no_bianuales_tslb |>
+  filter_index(. ~ "2017-07-30")
 
+# Now I do the Test series
+series_no_bianuales_tslb_test <- series_no_bianuales_tslb |>
+  filter_index("2017-07-31" ~ .)
+
+# I propose the models to be used by series:  
+tictoc::tic()
+series_no_bianuales_tslb_train_fit <- series_no_bianuales_tslb_train |> 
+  model(
+    ets = ETS(sales),
+    snaive = SNAIVE(sales),
+  )
+tictoc::toc()
+
+# Forecast:
+tictoc::tic()
+series_no_bianuales_tslb_train_fcst <- series_no_bianuales_tslb_train_fit |> 
+  forecast(h = 16) 
+tictoc::toc()
+series_no_bianuales_tslb_train_fcst
+
+# Combine forecast and test to compare:
+comparacion_modelos_basicos <- series_no_bianuales_tslb_train_fcst |>
+  left_join(series_no_bianuales_tslb_test, by = c("store_nbr", "family", "date"), suffix = c("_pred", "_real")) |>
+  select(-sales_pred) |>
+  rename(sales_pred = .mean) |>
+  rename(modelo = .model)
+comparacion_modelos_basicos 
+
+# I calculate the RMSLE
+tictoc::tic()
+rmsle_por_serie_modelos_basicos <- comparacion_modelos_basicos |>
+  as_tibble() |>
+  group_by(store_nbr, family, modelo) |> 
+  summarise(
+    rmsle = sqrt( mean( 
+      (log1p(sales_pred) - log1p(sales_real))^2 # formula
+    , na.rm = TRUE ) ),
+    .groups = "drop"
+  ) |>
+  arrange(rmsle) # Order by rmsle
+tictoc::toc()
+
+rmsle_por_serie_modelos_basicos
+```
+
+### Now I select the best model and I do the forecast:
+```{r}
+mejores_modelos_basicos <- rmsle_por_serie_modelos_basicos |>
+  group_by(store_nbr, family) |> 
+  slice_min(rmsle, n = 1) |>
+  ungroup() |> 
+  arrange(rmsle)
+
+# Ahora que identificamos los modelos importantes, procederemos a usarlos en la serie original:
+tictoc::tic()
+series_no_bianuales_tslb_fit <- series_no_bianuales_tslb |> 
+  model(
+    ets = ETS(sales),
+    snaive = SNAIVE(sales),
+  )
+tictoc::toc()
+
+# luego los forecast:
+
+tictoc::tic()
+series_no_bianuales_tslb_fcst_varios <- series_no_bianuales_tslb_fit |> 
+  forecast(h = 16)
+tictoc::toc()
+series_no_bianuales_tslb_fcst_varios
+
+# Selecciono los mejores:
+series_no_bianuales_fcst <- series_no_bianuales_tslb_fcst_varios |> 
+  left_join(mejores_modelos_basicos, by = c("store_nbr", "family")) |>
+  filter(.model == modelo) |>
+  select(store_nbr, family, date, sales, .mean, rmsle, modelo)
+series_no_bianuales_fcst
+```
+
+## Cero Analysis
+The reason for this analysis is that you will probably use ARIMA at some point, therefore it is necessary not to have so many zeros in the series
+```{r}
+series_ultimo_anio <- series_tsbl_importantes2 |>
+  filter_index("2016-08-15" ~ .)
+
+series_ordenadas_por_ceros <- series_ultimo_anio |>
+  as_tibble() |>
+  group_by(store_nbr, family) |>
+  summarise(
+    cantidad_ceros = sum(sales == 0, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(cantidad_ceros))  # Order by 'cantidad_ceros'
+
+series_ordenadas_por_ceros
+```
+
+### I filter the series that have more than 15 zeros in the last year and use simple models
+```{r}
+series_con_muchos_ceros <- series_ordenadas_por_ceros |>
+  filter(cantidad_ceros > 15)
+
+# Select data from tsibble
+series_con_muchos_ceros_tsbl <- series_tsbl_importantes2 |>
+  inner_join(series_con_muchos_ceros, by = c("store_nbr", "family")) |>
+  as_tsibble(index = date, key = c(store_nbr, family))
+series_con_muchos_ceros_tsbl
+
+# create 'series_tsbl_importantes3'
+series_tsbl_importantes3 <- series_tsbl_importantes2 |>
+  anti_join(series_con_muchos_ceros_tsbl, by = c("store_nbr", "family"))
+series_tsbl_importantes3
+
+```
+Now that I filtered the series by those that did have many zeros, so as not to analyze them later with ARIMA, what I will do is propose a list of simple models:
+  1. ETS
+  2. SNAIVE
+```{r}
+# First I do the Train series
+series_con_muchos_ceros_tsbl_train <- series_con_muchos_ceros_tsbl |>
+  filter_index(. ~ "2017-07-30")
+
+# Now I do the Test series
+series_con_muchos_ceros_tsbl_test <- series_con_muchos_ceros_tsbl |>
+  filter_index("2017-07-31" ~ .)
+
+# I propose the models to be used by series:  
+tictoc::tic()
+series_con_muchos_ceros_tsbl_train_fit <- series_con_muchos_ceros_tsbl_train |> 
+  model(
+    ets = ETS(sales),
+    snaive = SNAIVE(sales)
+  )
+tictoc::toc()
+
+# Forecast:
+tictoc::tic()
+series_con_muchos_ceros_tsbl_train_fcst <- series_con_muchos_ceros_tsbl_train_fit |> 
+  forecast(h = 16) 
+tictoc::toc()
+series_con_muchos_ceros_tsbl_train_fcst
+
+# Combine forecast and test to compare:
+comparacion_modelos_con_muchos_ceros <- series_con_muchos_ceros_tsbl_train_fcst |>
+  left_join(series_con_muchos_ceros_tsbl_test, by = c("store_nbr", "family", "date"), suffix = c("_pred", "_real")) |>
+  select(-sales_pred) |>
+  rename(sales_pred = .mean) |>
+  rename(modelo = .model)
+comparacion_modelos_con_muchos_ceros 
+
+# I calculate the RMSLE
+tictoc::tic()
+rmsle_por_serie_modelos_con_muchos_ceros <- comparacion_modelos_con_muchos_ceros |>
+  as_tibble() |>
+  group_by(store_nbr, family, modelo) |> 
+  summarise(
+    rmsle = sqrt( mean( 
+      (log1p(sales_pred) - log1p(sales_real))^2 # formula
+    , na.rm = TRUE ) ),
+    .groups = "drop"
+  ) |>
+  arrange(rmsle) # Order by rmsle
+tictoc::toc()
+
+rmsle_por_serie_modelos_con_muchos_ceros
+```
+
+### Now I select the best model and I do the forecast:
+```{r}
+mejores_modelos_con_muchos_ceros <- rmsle_por_serie_modelos_con_muchos_ceros |>
+  group_by(store_nbr, family) |> 
+  # Sort by rmsle first, then prioritize ets
+  arrange(rmsle, desc(modelo == "ets")) |>
+  slice_head(n = 1) |> 
+  ungroup()
+
+# Now that we've identified the important models, we'll proceed to use them in the original series:
+tictoc::tic()
+series_con_muchos_ceros_tsbl_fit <- series_con_muchos_ceros_tsbl |> 
+  model(
+    ets = ETS(sales),
+    snaive = SNAIVE(sales)
+  )
+tictoc::toc()
+
+# forecast:
+tictoc::tic()
+series_con_muchos_ceros_tsbl_fcst_varios <- series_con_muchos_ceros_tsbl_fit |> 
+  forecast(h = 16)
+tictoc::toc()
+series_con_muchos_ceros_tsbl_fcst_varios
+
+# Selecciono los mejores:
+series_con_muchos_ceros_tsbl_fcst <- series_con_muchos_ceros_tsbl_fcst_varios |> 
+  as_tibble() |>
+  left_join(mejores_modelos_con_muchos_ceros, by = c("store_nbr", "family")) |>
+  filter(.model == modelo) |>
+  select(store_nbr, family, date, sales, .mean, rmsle, modelo)
+series_con_muchos_ceros_tsbl_fcst
+```
+
+```{r}
+series_con_muchos_ceros_tsbl |>
+  features(sales, guerrero) |>
+  arrange(desc(lambda_guerrero))
 ```
 
 
 
 
+## Feature Analysis
+```{r}
+features <- series_tsbl_importantes3 |>
+  features(sales, list(
+    feat_stl,
+    feat_acf,
+    feat_pacf,
+    guerrero
+  )) |>
+  arrange(desc(acf1))
+
+features
+```
 
 
 
@@ -291,7 +529,7 @@ I can filter out those time series that predict well using a simple model.
 
 ```{r}
 tictoc::tic()
-series_tsbl_fit <- series_tsbl_importantes |> 
+series_tsbl_fit <- series_tsbl_importantes3 |> 
   model(
     ets = ETS(sales)
   )
@@ -318,12 +556,14 @@ tictoc::toc()
 series_tsbl_fcst
 ```
 
-Joining forecasts
+### Joining forecasts
 
 ```{r}
 full_fcst <- series_tsbl_fcst |> 
   bind_rows(series_ceros_fcst) |>
-  bind_rows(series_pobres_ultimo_mes_fcst)
+  bind_rows(series_pobres_ultimo_mes_fcst) |>
+  bind_rows(series_no_bianuales_fcst) |>
+  bind_rows(series_con_muchos_ceros_tsbl_fcst)
 
 full_fcst
 ```
@@ -337,14 +577,10 @@ submission <- full_fcst |>
   as_tibble() |>
   select(id, .mean) |>
   rename(sales = .mean)
-
 submission
-```
 
-
-```{r}
 submission |> 
-  write_csv("VersionesPrueba/submission_M3.csv")
+  write_csv("VersionesPrueba/submission_M7.csv")
 ```
 
 ## we finished using parallelism
