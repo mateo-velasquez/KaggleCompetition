@@ -36,7 +36,7 @@ library(tidymodels)
 library(tidyverse)
 library(tsibble)
 library(feasts)
-library(anomalize)
+#library(anomalize)
 library(fable)
 library(fabletools)
 library(purrr)
@@ -51,7 +51,7 @@ conflicts_prefer(
 ### I use multisession:
 ```{r}
 options(future.globals.maxSize = 2 * 1024^3)  # 2 GB
-plan(multisession, workers = 8) # Usa varios núcleos
+plan(multisession, workers = 4) # Usa varios núcleos
 ```
 
 # Data import
@@ -415,7 +415,8 @@ tictoc::tic()
 series_con_muchos_ceros_tsbl_train_fit <- series_con_muchos_ceros_tsbl_train |> 
   model(
     ets = ETS(sales),
-    snaive = SNAIVE(sales)
+    LOGets = ETS(log(sales)),
+    #snaive = SNAIVE(sales)
   )
 tictoc::toc()
 
@@ -465,7 +466,8 @@ tictoc::tic()
 series_con_muchos_ceros_tsbl_fit <- series_con_muchos_ceros_tsbl |> 
   model(
     ets = ETS(sales),
-    snaive = SNAIVE(sales)
+    LOGets = ETS(log(sales)),
+    #snaive = SNAIVE(sales)
   )
 tictoc::toc()
 
@@ -580,7 +582,7 @@ submission <- full_fcst |>
 submission
 
 submission |> 
-  write_csv("VersionesPrueba/submission_M7.csv")
+  write_csv("VersionesPrueba/submission_M9.csv")
 ```
 
 ## we finished using parallelism
